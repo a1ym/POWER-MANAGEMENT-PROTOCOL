@@ -10,7 +10,7 @@ from Crypto.Util.Padding import pad, unpad
 import os
 import json
 
-
+PID = 999999 #ENTER A VALID PID
 SEQ_NUM = 0
 address = ("127.0.0.1", 4444)
 bufferSize = 4096
@@ -104,12 +104,13 @@ def listen(serverSharedKey):
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
         s.sendto(repr(packet).encode('utf-8'), clientAddress)
     elif str(final)[2:-1] == "010":
-        proc = 999999 #enter valid process id
+        proc = PID #enter valid process id
         try:
             psutil.Process(pid=proc).suspend()
             response = "010"
         except:
             response = "000"
+            
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
         s.sendto(repr(packet).encode('utf-8'), clientAddress)
     elif str(final)[2:-1] == "011":
