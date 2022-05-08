@@ -25,16 +25,16 @@ def diffieHellman():
     client = pyDH.DiffieHellman(group = modp)
     clientPubKey = client.gen_public_key()
     SEQ_NUM += 1
-    packetFlags = "1001" #Connection opened, SYN and AUTH bits are set to 1
-    packet = constructPacket(str(bin(clientPubKey)[2:]), packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), None)
-    s.sendto(repr(packet).encode('utf-8'), (SERVER_IP, SERVER_PORT))
-    sentData = {'modp_id': modp, 'pub_key': clientPubKey}
+    packetFlags = "1000" #Connection opened, SYN bit is set to 1
+    sentData = {"modp_id": modp, "pub_key": clientPubKey}
     sentData = json.dumps(sentData)
+    packet = constructPacket(sentData, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), None)
+    s.sendto(packet, (SERVER_IP, SERVER_PORT))
     print(sentData)
     #Retransmit packet on response timeout
     try:
         checksum, flags, data, seqNum = recievePacket(None)
-        serverPubKey = int(str(data)[2:-2], 2)
+        serverPubKey = json.loads(data)["pub_key"]
         clientSharedKey = client.gen_shared_key(serverPubKey)
         return clientSharedKey
     except:
@@ -44,40 +44,41 @@ def diffieHellman():
         print("Retrying...")
         time.sleep(3)
         diffieHellman()
-       
+
 
 #Construct packet by combining data, packet flags and sequence number.
 def constructPacket(data, packetFlags, seqNum, key):
-    header = packetFlags + seqNum
+    header = int(packetFlags + seqNum, 2)
     if key != None:
         data = aesEncrypt(data, key) #encrypting the data
-        data = bytesToBits(data)
-    packet = header + data
-    checkSum = zlib.crc32(bin(int(packet, base=2)).encode())
-    checkSum = str(bin(checkSum))[2:].zfill(32)
-    packet = checkSum + packetFlags + seqNum + data
+    else:
+        data = data.encode()
+    packet = bytes.fromhex(format(header, "04x")) + data
+    checkSum = zlib.crc32(packet).to_bytes(4, byteorder="big")
+    packet = checkSum + packet
     return packet
+
 
 #Unpack the packet and verify data through checksum
 def unpackPacket(packet):
-    checkSum = packet[0:33]
-    flags = packet[33:37]
-    seqNum = packet[37:49]
-    data = packet[49:]
-    checkSumData = flags + seqNum + data
-    checkSumData = str(checkSumData)[2:-2]
-    checkSumVerify = zlib.crc32(bin(int(checkSumData, base=2)).encode()) # convert packet to binary
-    checkSumVerify = str(bin(checkSumVerify))[2:].zfill(32)
-    if str(checkSum)[3:-1] != checkSumVerify:
-        sentData = {'err': 'Checksum error'}
+    checkSum = packet[0:4]
+    header = format(int.from_bytes(packet[4:6], byteorder="big"), "016b")
+    flags = header[:4]
+    seqNum = int(header[4:], 2)
+    data = packet[6:]
+    checkSumData = packet[4:]
+    checkSumVerify = zlib.crc32(checkSumData).to_bytes(4, byteorder="big")
+    if checkSum != checkSumVerify:
+        sentData = {"err": "Checksum error"}
         sentData = json.dumps(sentData)
         return(sentData)
     else:
-        sentData = {'ok': 'Checksum verified'}
+        sentData = {"ok": "Checksum verified"}
         sentData = json.dumps(sentData)
         print(sentData)
         
     return checkSum, flags, data, seqNum
+
 
 #Encryption of packet data (excluding headers)
 def aesEncrypt(data, sharedKey):
@@ -92,21 +93,10 @@ def aesEncrypt(data, sharedKey):
 #Decryption of packet data
 def aesDecrypt(data, key):
     key = hashlib.sha256(key.encode()).digest()
-    y = 1
-    currentBit = ""
-    results = []
-    
-    for i in str(data):
-        currentBit = currentBit + i
-        if y % 8 == 0:
-            results.append(int(currentBit, base=2))
-            currentBit = ""
-        y += 1
-        
-    data = bytes(results)
     iv = data[-16:]
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return unpad(cipher.decrypt(data[:-16]), 16)
+
 
 #Send commands to server and recieve response
 def sendCommand(command, key):
@@ -114,7 +104,7 @@ def sendCommand(command, key):
     packetFlags = "0000"
     SEQ_NUM += 2
     packet = constructPacket(command, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), key)
-    s.sendto(repr(packet).encode('utf-8'), (SERVER_IP, SERVER_PORT))
+    s.sendto(packet, (SERVER_IP, SERVER_PORT))
     #Retransmit packet on response timeout
     try:
         recievePacket(key)
@@ -126,57 +116,17 @@ def sendCommand(command, key):
         time.sleep(3)
         sendCommand(command, key)
         
-def bytesToBits(bytesList):
-    results = ""
-    for i in bytesList:
-        results += str(bin(int(i))[2:]).zfill(8)    
-    return results
 
 #Recieve and ouput a packet
 def recievePacket(key):
     packet, serverAddress = s.recvfrom(bufferSize)
     checksum, flags, data, seqNum = unpackPacket(packet)
-    print("SYN: " + str(flags)[2], "RES: " + str(flags)[3], "CRP: " + str(flags)[4], "AUTH: " + str(flags)[5])
-    print("SEQ " + str(int(seqNum, 2)))
+    print("SYN: " + flags[0], "RES: " + flags[1], "CRP: " + flags[2], "AUTH: " + flags[3])
+    print("SEQ: " + str(seqNum))
     if key != None:
-        data = str(data)[2:-2]
         data = aesDecrypt(data, key)
-    if str(data) == str(b'0000'):
-        recievedData = { "ok": "NONE" }
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0001'):
-        recievedData = { "ok": "Battery present" } #I don't have a laptop to test or output the battery percentage
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0010'):
-        recievedData = { "ok": "NONE" }
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0011'):
-        recievedData = { "ok": "Battery present" } #I don't have a laptop to test or output the battery percentage
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0100'):
-        recievedData = { "ok": "Process is being suspended..." } #A valid process ID must be entered
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0101'):
-        recievedData = { "err": "Process has failed to suspend" }
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0110'):
-        recievedData = { "ok": "System is beeing restarted..." }
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'0111'):
-        recievedData = { "ok": "System is beeing powered off..." }
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
-    elif str(data) == str(b'1000'):
-        recievedData = { "ok": "Closing connection..." }
-        recievedData = json.dumps(recievedData)
-        print("DATA: ", recievedData)
+
+    print("RESPONSE: " + data.decode())
     return checksum, flags, data, seqNum
 
 #Let user send commands to server, recieve and output the response from server
@@ -200,17 +150,17 @@ END_CONN - Acknowledge request and wait for 20 sec before closing the connection
     while True:
         option = input("::: ")
         if option == "PWR_STAT":
-            sendCommand("0000", key)
+            sendCommand(json.dumps({"cmd": "PWR_STAT"}), key)
         elif option == "BTRY_LVL":
-            sendCommand("0010", key)
+            sendCommand(json.dumps({"cmd": "BTRY_LVL"}), key)
         elif option == "SUSPND":
-            sendCommand("0100", key)
+            sendCommand(json.dumps({"cmd": "SUSPND"}), key)
         elif option == "REBOOT":
-            sendCommand("0110", key)
+            sendCommand(json.dumps({"cmd": "REBOOT"}), key)
         elif option == "PWROFF":
-            sendCommand("0111", key)
+            sendCommand(json.dumps({"cmd": "PWROFF"}), key)
         elif option == "END_CONN":
-            sendCommand("1000", key)
+            sendCommand(json.dumps({"cmd": "END_CONN"}), key)
             time.sleep(20)
             exit()
         

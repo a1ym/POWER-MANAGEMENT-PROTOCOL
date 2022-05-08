@@ -26,43 +26,44 @@ def diffieHellman():
     clientPubKey, clientAddress = s.recvfrom(bufferSize)
     global SEQ_NUM
     SEQ_NUM += 1
-    packetFlags = "1001" #Connection opened, SYN and AUTH bits are set to 1
-    packet = constructPacket(str(bin(serverPubKey)[2:]), packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), None)
-    s.sendto(repr(packet).encode('utf-8'), clientAddress)
+    packetFlags = "1100" #Connection opened, SYN and AUTH bits are set to 1
+    sentData = {"pub_key": serverPubKey}
+    sentData = json.dumps(sentData)
+    packet = constructPacket(sentData, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), None)
+    s.sendto(packet, clientAddress)
     checkSum, flags, data, seqNum = unpackPacket(clientPubKey)
-    clientPubKey = int(str(data)[2:-2], 2)
+    clientPubKey = json.loads(data)["pub_key"]
     serverSharedKey = server.gen_shared_key(clientPubKey)
     while True:
         listen(serverSharedKey)
         
 #Construct packet by combining data, packet flags and sequence number.
 def constructPacket(data, packetFlags, seqNum, key):
-    header = packetFlags + seqNum
+    header = int(packetFlags + seqNum, 2)
     if key != None:
-        data = aesEncrypt(data, key)
-        data = bytesToBits(data)
-    packet = header + data
-    checkSum = zlib.crc32(bin(int(packet, base=2)).encode()) # convert packet to binary
-    checkSum = str(bin(checkSum))[2:].zfill(32)
-    packet = checkSum + packetFlags + seqNum + data
+        data = aesEncrypt(data, key) #encrypting the data
+    else:
+        data = data.encode()
+    packet = bytes.fromhex(format(header, "04x")) + data
+    checkSum = zlib.crc32(packet).to_bytes(4, byteorder="big")
+    packet = checkSum + packet
     return packet
 
 #Unpack the packet and verify data through checksum
 def unpackPacket(packet):
-    checkSum = packet[0:33]
-    flags = packet[33:37]
-    seqNum = packet[37:49]
-    data = packet[49:]
-    checkSumData = flags + seqNum + data
-    checkSumData = str(checkSumData)[2:-2]
-    checkSumVerify = zlib.crc32(bin(int(checkSumData, base=2)).encode()) # convert packet to binary
-    checkSumVerify = str(bin(checkSumVerify))[2:].zfill(32)
-    if str(checkSum)[3:-1] != checkSumVerify:
-        sentData = {'err': 'Checksum error'}
+    checkSum = packet[0:4]
+    header = format(int.from_bytes(packet[4:6], byteorder="big"), "016b")
+    flags = header[:4]
+    seqNum = int(header[4:], 2)
+    data = packet[6:]
+    checkSumData = packet[4:]
+    checkSumVerify = zlib.crc32(checkSumData).to_bytes(4, byteorder="big")
+    if checkSum != checkSumVerify:
+        sentData = {"err": "Checksum error"}
         sentData = json.dumps(sentData)
         return(sentData)
     else:
-        sentData = {'ok': 'Checksum verified'}
+        sentData = {"ok": "Checksum verified"}
         sentData = json.dumps(sentData)
         print(sentData)
     return checkSum, flags, data, seqNum
@@ -71,51 +72,51 @@ def unpackPacket(packet):
 def listen(serverSharedKey):
     message, clientAddress = s.recvfrom(bufferSize)
     checksum, flags, data, seqNum = unpackPacket(message)
-    data = str(data)[2:-2]
     final = aesDecrypt(data, serverSharedKey)
     global SEQ_NUM
     packetFlags = "0100"
     SEQ_NUM += 1
-    if str(final)[2:-1] == "0000":
+    cmd = json.loads(final)["cmd"]
+    if cmd == "PWR_STAT":
         battery = psutil.sensors_battery() #I don't have a laptop to test or output the battery percentage
         if battery == None: 
-            response ="0000"
+            response = json.dumps({"ok": "NONE"})
         else:
-            response = "0001"
+            response = json.dumps({"ok": "Battery present"})
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
-        s.sendto(repr(packet).encode('utf-8'), clientAddress)
-    elif str(final)[2:-1] == "0010":
+        s.sendto(packet, clientAddress)
+    elif cmd == "BTRY_LVL":
         battery = psutil.sensors_battery() #I don't have a laptop to test or output the battery percentage
         if battery == None: 
-            response ="0010"
+            response = json.dumps({"ok": "NONE"})
         else:
-            response = "0011"
+            response = json.dumps({"ok": "Battery present"})
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
-        s.sendto(repr(packet).encode('utf-8'), clientAddress)
-    elif str(final)[2:-1] == "0100":
+        s.sendto(packet, clientAddress)
+    elif cmd == "SUSPND":
         proc = PID #enter valid process id
         try:
             psutil.Process(pid=proc).suspend()
-            response = "0100"
+            response = json.dumps({"ok": "Process is being suspended..."})
         except Exception as exc:
             print(exc)
-            response = "0101"
+            response = json.dumps({"ok": "Process has failed to suspend"})
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
-        s.sendto(repr(packet).encode('utf-8'), clientAddress)
-    elif str(final)[2:-1] == "0110":
-        response = "0110"
+        s.sendto(packet, clientAddress)
+    elif cmd == "REBOOT":
+        response = json.dumps({"ok": "System is beeing restarted..."})
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
-        s.sendto(repr(packet).encode('utf-8'), clientAddress)
+        s.sendto(packet, clientAddress)
         os.system("shutdown /r /t 20")
-    elif str(final)[2:-1] == "0111":
-        response = "0111"
+    elif cmd == "PWROFF":
+        response = json.dumps({"ok": "System is beeing powered off..."})
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
-        s.sendto(repr(packet).encode('utf-8'), clientAddress)
+        s.sendto(packet, clientAddress)
         os.system("shutdown /s /t 20")
-    elif str(final)[2:-1] == "1000":
-        response = "1000"
+    elif cmd == "END_CONN":
+        response = json.dumps({"ok": "Closing connection..."})
         packet = constructPacket(response, packetFlags, str(bin(SEQ_NUM)[2:]).zfill(12), serverSharedKey)
-        s.sendto(repr(packet).encode('utf-8'), clientAddress)
+        s.sendto(packet, clientAddress)
         time.sleep(20)
         s.close()
         exit()
@@ -123,16 +124,6 @@ def listen(serverSharedKey):
 #Decryption of packet data
 def aesDecrypt(data, key):
     key = hashlib.sha256(key.encode()).digest()
-    y = 1
-    currentBit = ""
-    results = []
-    for i in str(data):
-        currentBit = currentBit + i
-        if y % 8 == 0:
-            results.append(int(currentBit, base=2))
-            currentBit = ""
-        y += 1
-    data = bytes(results)
     iv = data[-16:]
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return unpad(cipher.decrypt(data[:-16]), 16)
@@ -145,11 +136,5 @@ def aesEncrypt(data, sharedKey):
     cipher = AES.new(key, mode)
     data = cipher.encrypt(pad(data.encode(), 16)) + cipher.iv
     return data
-
-def bytesToBits(bytesList):
-    results = ""
-    for i in bytesList:
-        results += str(bin(int(i))[2:]).zfill(8)    
-    return results
 
 diffieHellman()
